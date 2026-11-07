@@ -259,6 +259,7 @@ async def main():
 
     # Creating a dimension from another copies one hash: no key and no value is copied.
     await store.create_dimension("branch-a", source="main")
+    assert sorted(store.dimensions()) == ["branch-a", "main"]
     assert store.root_hash("branch-a") == store.root_hash("main")
 
     await store.update("branch-a", "r1", lambda v: merge(v, {"vlans": [40]}, lists="append"))
@@ -277,6 +278,8 @@ asyncio.run(main())
 ```
 
 - `create_dimension(name, source=None)` creates an empty dimension, or one with the keys and values of `source`.
+- `dimensions()` synchronously returns a new list of the names held in this store's memory, in no defined order. The list includes empty dimensions. It does not query the external cache or call the loader; changing the list does not change the store.
+- `await has_dimension(dimension)` returns whether the name is held in memory or has a root entry in the external cache. It checks memory first, then makes one root lookup if needed. It does not fetch nodes, call the loader, or add the dimension to memory. Backend errors propagate.
 - `replace_dimension(name, source)` replaces the keys and values of the existing dimension `name` with those of `source` (see [Replacing the content of a dimension](#replacing-the-content-of-a-dimension)).
 - `set`, `get`, `delete` and `update` store, read, delete and change the value under a key. `update(dimension, key, change)` stores `change(value)`, where `change` is usually a call to `set_in()`, `delete_in()` or `merge()`, or an `async` function.
 - `keys(dimension)` returns the keys in no defined order, without reading any value.
@@ -511,6 +514,8 @@ class MyBackend:
 
 Processes that use the same external cache share their dimensions. Each change to a dimension writes its new nodes, then its new root hash. A process that reads a dimension it does not hold in memory reads the root hash from the external cache and fetches the key map, one level at a time, then the values it reads.
 
+`has_dimension()` can find a dimension held only in the external cache while `dimensions()` lists only those held locally. A successful read or reload adds the dimension to the local list. A positive existence check does not guarantee that every node is still cached or that a later operation will succeed. A dimension held locally still exists for that store after the external cache loses its root entry.
+
 A process that holds a dimension in memory does not see changes that other processes make until the application calls `reload()`. Nodes never change, so the root hash is the only thing to check.
 
 ```python
@@ -526,7 +531,11 @@ async def main():
 
     await process_a.create_dimension("main")
     await process_a.set("main", "r1", {"site": "paris"})
+    assert process_b.dimensions() == []
+    assert await process_b.has_dimension("main") is True
+    assert process_b.dimensions() == []
     assert await process_b.get("main", "r1") == {"site": "paris"}
+    assert process_b.dimensions() == ["main"]
 
     await process_a.set("main", "r1", {"site": "lyon"})
     assert await process_b.get("main", "r1") == {"site": "paris"}

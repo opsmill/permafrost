@@ -129,6 +129,26 @@ class Store[V]:
                 raise DimensionNotFoundError(name)
             await self._commit(name, await self._root(source), previous=current)
 
+    def dimensions(self) -> list[str]:
+        """Return a new list of dimension names held in this store's memory.
+
+        Names have no defined order. This snapshot does not query the external
+        cache or call the loader, and changing it does not change the store.
+        """
+        return list(self._dims)
+
+    async def has_dimension(self, dimension: str) -> bool:
+        """Return whether memory or the external cache holds the dimension.
+
+        A local match needs no backend call. Otherwise check only the external
+        root entry, without fetching nodes, calling the loader, or adding the
+        dimension to memory. A root entry does not guarantee that all nodes
+        are still cached. Backend errors propagate.
+        """
+        if dimension in self._dims:
+            return True
+        return self.backend is not None and await self.backend.get_root(dimension) is not None
+
     def root_hash(self, dimension: str) -> bytes:
         """Return the root hash of a dimension held in memory.
 

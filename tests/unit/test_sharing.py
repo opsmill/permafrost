@@ -1,5 +1,7 @@
 """Scenarios of specs/dimension-sharing/spec.md."""
 
+from unittest.mock import AsyncMock, patch
+
 import fakeredis
 import pytest
 
@@ -22,6 +24,75 @@ def a():
 @pytest.fixture
 def b():
     return Process()
+
+
+@pytest.mark.parametrize("operation", ["read", "reload"])
+async def test_list_dimensions_after_loading_from_backend(backend, a, b, operation):
+    with a:
+        writer = Store(backend)
+        await writer.create_dimension("main")
+        await writer.set("main", "k", 1)
+    with b:
+        reader = Store(backend)
+        backend.log.clear()
+        with patch.object(backend, "get_root", new_callable=AsyncMock) as get_root:
+            assert reader.dimensions() == []
+            assert writer.dimensions() == ["main"]
+            get_root.assert_not_awaited()
+        assert backend.log == []
+        if operation == "read":
+            assert await reader.get("main", "k") == 1
+        else:
+            await reader.reload("main")
+        assert reader.dimensions() == ["main"]
+
+
+@pytest.mark.parametrize("populated", [False, True])
+async def test_has_local_dimension_without_backend_lookup(backend, a, populated):
+    with a:
+        store = Store(backend)
+        await store.create_dimension("main")
+        if populated:
+            await store.set("main", "k", 1)
+        backend.clear()
+        backend.log.clear()
+        with patch.object(backend, "get_root", new_callable=AsyncMock) as get_root:
+            get_root.side_effect = ConnectionError("backend unavailable")
+            assert await store.has_dimension("main") is True
+            get_root.assert_not_awaited()
+        assert backend.log == []
+        assert store.dimensions() == ["main"]
+
+
+@pytest.mark.parametrize("state", ["present", "missing", "lost-nodes", "unavailable"])
+async def test_has_nonlocal_dimension_checks_only_root(backend, a, b, state):
+    async def loader(dimension: str, key: str) -> int:
+        raise AssertionError("Checking a dimension must not call the loader")
+
+    with a:
+        writer = Store(backend)
+        await writer.create_dimension("main")
+        await writer.set("main", "k", 1)
+    if state == "missing":
+        backend.clear()
+    elif state == "lost-nodes":
+        backend.drop(list(backend.nodes))
+    with b:
+        reader = Store[int](backend, loader=loader)
+        backend.log.clear()
+        with patch.object(backend, "get_root", wraps=backend.get_root) as get_root:
+            if state == "unavailable":
+                get_root.side_effect = ConnectionError("backend unavailable")
+                with pytest.raises(ConnectionError, match="backend unavailable"):
+                    await reader.has_dimension("main")
+            else:
+                assert await reader.has_dimension("main") is (state != "missing")
+            get_root.assert_awaited_once_with("main")
+        assert backend.log == []
+        assert reader.dimensions() == []
+        if state == "lost-nodes":
+            with pytest.raises(DimensionNotFoundError):
+                await reader.keys("main")
 
 
 async def test_order_of_writes(backend, a):

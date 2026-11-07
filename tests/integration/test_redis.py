@@ -95,6 +95,40 @@ async def test_cold_reader_reconstructs_nested_value(
         assert reader.root_hash("main") == root
 
 
+async def test_dimension_discovery_does_not_load_from_redis(
+    redis_backend: RedisBackend[Redis], redis_peer: RedisBackend[Redis]
+) -> None:
+    with Process():
+        writer = Store[int](redis_backend)
+        await writer.create_dimension("main")
+        await writer.set("main", "k", 1)
+        root = writer.root_hash("main")
+        assert writer.dimensions() == ["main"]
+
+    async def loader(dimension: str, key: str) -> int:
+        raise AssertionError("Dimension discovery must not call the loader")
+
+    with Process():
+        reader = Store[int](redis_peer, loader=loader)
+        assert registry.lookup(root, object) is None
+        assert reader.dimensions() == []
+        assert await reader.has_dimension("unknown") is False
+        assert await reader.has_dimension("main") is True
+        assert reader.dimensions() == []
+        assert registry.lookup(root, object) is None
+        with pytest.raises(DimensionNotFoundError):
+            reader.root_hash("main")
+
+        assert await reader.get("main", "k") == 1
+        assert reader.dimensions() == ["main"]
+        assert reader.root_hash("main") == root
+
+        assert await redis_backend.client.delete(f"{redis_backend.prefix}dim:main") == 1
+        assert await reader.has_dimension("main") is True
+        assert reader.dimensions() == ["main"]
+        assert await Store[int](redis_backend).has_dimension("main") is False
+
+
 async def test_reader_sees_updates_only_after_reload(
     redis_backend: RedisBackend[Redis], redis_peer: RedisBackend[Redis]
 ) -> None:

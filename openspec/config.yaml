@@ -1,5 +1,14 @@
 schema: spec-driven
 
+context: |
+  Any new or changed behavior that uses the external cache requires real Redis
+  integration coverage through the public Store API, even when the Redis backend
+  implementation is unchanged. Include that coverage in designs and tasks;
+  MemoryBackend, mocks, fakeredis, and existing Redis tests alone are insufficient.
+  For sharing between stores, use separate Process contexts and the Redis backend
+  and peer fixtures. Run the integration suite with Docker, or explicitly report
+  why it could not run.
+
 # Project context (optional)
 # Add only constraints that should guide OpenSpec artifacts and workflows.
 # Include constraints an agent cannot infer by reading the code.
