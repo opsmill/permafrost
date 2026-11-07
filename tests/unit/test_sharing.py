@@ -60,6 +60,62 @@ async def test_failed_write_leaves_the_dimension_unchanged(a):
         assert backend.roots["main"] == store.root_hash("main")
 
 
+async def test_replace_a_dimension_writes_only_the_root_hash(backend, a):
+    with a:
+        store = Store(backend)
+        await store.create_dimension("main")
+        for i in range(200):
+            await store.set("main", f"key-{i}", {"id": i})
+        await store.create_dimension("candidate", source="main")
+        await store.set("candidate", "key-0", {"id": 0, "changed": True})
+        backend.log.clear()
+        await store.replace_dimension("main", "candidate")
+        assert backend.log == ["set_root"]
+        assert backend.roots["main"] == store.root_hash("candidate")
+
+
+async def test_other_process_reads_the_replaced_dimension(backend, a, b):
+    with a:
+        store_a = Store(backend)
+        await store_a.create_dimension("main")
+        await store_a.set("main", "k", {"v": 1})
+    with b:
+        store_b = Store(backend)
+        assert await store_b.get("main", "k") == {"v": 1}
+    with a:
+        await store_a.create_dimension("candidate", source="main")
+        await store_a.set("candidate", "k", {"v": 2})
+        await store_a.replace_dimension("main", "candidate")
+    with b:
+        assert await store_b.get("main", "k") == {"v": 1}
+        await store_b.reload("main")
+        assert await store_b.get("main", "k") == {"v": 2}
+        assert await Store(backend).get("main", "k") == {"v": 2}
+
+
+async def test_replace_a_dimension_held_only_in_the_external_cache(backend, a, b):
+    with a:
+        store_a = Store(backend)
+        await store_a.create_dimension("main")
+        await store_a.set("main", "k", {"v": 1})
+    with b:
+        store_b = Store(backend)
+        await store_b.create_dimension("candidate")
+        await store_b.set("candidate", "k", {"v": 2})
+        await store_b.replace_dimension("main", "candidate")
+        assert backend.roots["main"] == store_b.root_hash("candidate")
+        assert await store_b.get("main", "k") == {"v": 2}
+
+
+async def test_replace_a_dimension_that_no_process_wrote(backend, a):
+    with a:
+        store = Store(backend)
+        await store.create_dimension("candidate")
+        with pytest.raises(DimensionNotFoundError):
+            await store.replace_dimension("main", "candidate")
+        assert "main" not in backend.roots
+
+
 async def test_second_process_reads_a_key(backend, a, b):
     with a:
         store_a = Store(backend)

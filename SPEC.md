@@ -119,6 +119,7 @@ Values and key maps are both trees of read-only nodes, stored once in the regist
 - A user stores a value under a key in a given dimension, and reads it back from that dimension.
 - A user reads one dimension at a time. Reading a dimension does not require loading the other dimensions.
 - A user creates a new dimension from an existing one. The new dimension is an independent copy from the start: later changes to either dimension do not affect the other.
+- A user replaces the keys and values of an existing dimension with those of another dimension, in one step. Like creating a dimension from another, this copies the root hash of the key map. Readers of the dimension get either the previous content or the new content, never part of each. Later changes to either dimension do not affect the other. This lets an application build and validate a change in a candidate dimension, then switch the original dimension to it.
 - The library supports hundreds to thousands of dimensions in the same process.
 - Branches are the main use case, but the library does not depend on the meaning of a dimension. Any name or identifier can be used as a dimension.
 
@@ -195,6 +196,7 @@ These rules come from the existing project notes in `AGENTS.md` and need confirm
 - Permafrost keeps the map from dimension name to the root hash of its key map in memory and also writes it to the external cache, so other processes that use the same external cache can read the dimension.
 - A process that reads a dimension it does not hold in memory reads the root hash from the external cache, then fetches the key map nodes and value nodes it needs by hash.
 - When a process changes a dimension, it writes the new nodes to the external cache first, then writes the new root hash. A process that reads the new root hash can then fetch every node it refers to, unless the external cache has removed some of them since.
+- Replacing the content of a dimension with the content of another writes only the new root hash, because the external cache already holds the nodes of the other dimension, unless it has removed some of them since.
 - The root hash of a dimension is the only stored data that changes. A process that holds a dimension in memory can hold a root hash that another process has replaced since. Nodes never change, so only the root hash needs to be checked to find out whether a dimension is up to date.
 - The calling application decides when a process checks for a newer root hash. Permafrost provides an operation that reads the current root hash of a dimension from the external cache and switches the dimension in memory to it. Permafrost does not check on its own.
 - Permafrost writes the root hash of a dimension without checking whether another process changed it since. When two processes change the same dimension at the same time, the last write of the root hash replaces the other, and the other change is lost. The calling application is responsible for preventing concurrent changes to the same dimension.
@@ -255,6 +257,7 @@ These rules come from the existing project notes in `AGENTS.md` and need confirm
 - Can a value be indexed by more than one dimension at once, such as branch and time?
 - Merge rules: confirm the rules carried over from `AGENTS.md`, and define how an incremental update to a list works.
 - Memory targets: the expected number of dimensions, number of keys and size of a value, and the acceptable memory use for each new dimension.
+- Whether replacing the content of a dimension can check first that the dimension still has an expected root hash. Preventing concurrent changes from several processes is out of scope.
 
 ## Measured memory and creation time
 

@@ -115,6 +115,20 @@ class Store[V]:
             root = keymap.EMPTY if source is None else await self._root(source)
             await self._commit(name, root)
 
+    async def replace_dimension(self, name: str, source: str) -> None:
+        """Replace the keys and values of the existing dimension ``name`` with those of ``source``.
+
+        ``name`` then shares every node with ``source``: this copies one hash
+        and commits it in one step, so readers of ``name`` get either the
+        previous content or the content of ``source``, never part of each.
+        Later changes to either dimension do not affect the other.
+        """
+        async with self._lock(name):
+            current = self._dims.get(name)
+            if current is None and (self.backend is None or await self.backend.get_root(name) is None):
+                raise DimensionNotFoundError(name)
+            await self._commit(name, await self._root(source), previous=current)
+
     def root_hash(self, dimension: str) -> bytes:
         """Return the root hash of a dimension held in memory.
 

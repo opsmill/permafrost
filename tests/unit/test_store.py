@@ -168,6 +168,84 @@ async def test_cost_of_creating_a_dimension():
     assert store.root_hash("branch-a") == store.root_hash("main")
 
 
+# Replace the content of a dimension with the content of another
+
+
+async def test_switch_a_dimension_to_a_candidate(store):
+    await store.set("main", "device-1", {"v": 1})
+    await store.set("main", "device-2", {"v": 2})
+    await store.create_dimension("candidate", source="main")
+    await store.set("candidate", "device-1", {"v": 10})
+    await store.delete("candidate", "device-2")
+    await store.set("candidate", "device-3", {"v": 3})
+    await store.replace_dimension("main", "candidate")
+    assert store.root_hash("main") == store.root_hash("candidate")
+    assert sorted(await store.keys("main")) == ["device-1", "device-3"]
+    assert await store.get("main", "device-1") == {"v": 10}
+    assert await store.diff_keys("main", "candidate") == []
+
+
+async def test_changes_after_a_replace_stay_in_one_dimension(store):
+    await store.create_dimension("candidate", source="main")
+    await store.set("candidate", "k", {"v": 1})
+    await store.replace_dimension("main", "candidate")
+    await store.set("candidate", "k", {"v": 2})
+    await store.set("main", "other", {"v": 3})
+    assert await store.get("main", "k") == {"v": 1}
+    with pytest.raises(KeyNotFoundError):
+        await store.get("candidate", "other")
+
+
+async def test_put_the_previous_content_back(store):
+    await store.set("main", "k", {"v": 1})
+    before = store.root_hash("main")
+    await store.create_dimension("backup", source="main")
+    await store.set("main", "k", {"v": 2})
+    await store.set("main", "new", {"v": 3})
+    await store.replace_dimension("main", "backup")
+    assert store.root_hash("main") == before
+    assert await store.keys("main") == ["k"]
+    assert await store.get("main", "k") == {"v": 1}
+
+
+async def test_replace_a_dimension_with_itself(store):
+    await store.set("main", "k", {"v": 1})
+    before = store.root_hash("main")
+    await store.replace_dimension("main", "main")
+    assert store.root_hash("main") == before
+
+
+async def test_replace_a_dimension_that_does_not_exist(store):
+    with pytest.raises(DimensionNotFoundError):
+        await store.replace_dimension("nope", "main")
+    with pytest.raises(DimensionNotFoundError):
+        store.root_hash("nope")
+
+
+async def test_replace_with_a_source_that_does_not_exist(store):
+    await store.set("main", "k", {"v": 1})
+    before = store.root_hash("main")
+    with pytest.raises(DimensionNotFoundError):
+        await store.replace_dimension("main", "nope")
+    assert store.root_hash("main") == before
+
+
+async def test_cost_of_replacing_a_dimension():
+    store = Store()
+    await store.create_dimension("main")
+    await _fill(store, "main", 1000)
+    await store.create_dimension("candidate", source="main")
+    await store.set("candidate", "key-0", {"id": 0, "name": "renamed"})
+    counter = _Counter()
+    registry.add_listener(counter)
+    try:
+        await store.replace_dimension("main", "candidate")
+    finally:
+        registry.remove_listener(counter)
+    assert counter.created == []
+    assert store.root_hash("main") == store.root_hash("candidate")
+
+
 async def test_same_keys_added_in_different_orders():
     store = Store()
     await store.create_dimension("one")

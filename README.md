@@ -277,12 +277,53 @@ asyncio.run(main())
 ```
 
 - `create_dimension(name, source=None)` creates an empty dimension, or one with the keys and values of `source`.
+- `replace_dimension(name, source)` replaces the keys and values of the existing dimension `name` with those of `source` (see [Replacing the content of a dimension](#replacing-the-content-of-a-dimension)).
 - `set`, `get`, `delete` and `update` store, read, delete and change the value under a key. `update(dimension, key, change)` stores `change(value)`, where `change` is usually a call to `set_in()`, `delete_in()` or `merge()`, or an `async` function.
 - `keys(dimension)` returns the keys in no defined order, without reading any value.
 - `diff_keys(a, b)` returns the keys whose values differ between two dimensions. `diff(a, b, key)` returns the diff of one key. Both skip every part whose hash is the same on both sides.
 - `root_hash(dimension)` returns the root hash of a dimension held in memory. Two dimensions with the same keys and values have the same root hash, whatever the order in which the keys were added.
 
 Two tasks in the same process that change the same dimension run one after the other. A `Store` is not thread-safe.
+
+### Replacing the content of a dimension
+
+An application that validates a change before it applies it can build the change in a candidate dimension, then switch the original dimension to it in one step with `replace_dimension(name, source)`. Like `create_dimension(name, source)`, this copies one hash, but `name` must already exist. Readers of `name` get either the previous content or the content of `source`, never part of each. With an external cache, the store writes only the new root hash of `name`, because every node is already there.
+
+To put the previous content back if a later step fails, copy the dimension before the change and replace it with the copy.
+
+```python
+import asyncio
+
+from permafrost import Store
+
+
+async def main():
+    store = Store()
+    await store.create_dimension("main")
+    await store.set("main", "r1", {"site": "paris"})
+    before = store.root_hash("main")
+
+    # Keep the current content, then build and validate the change in a candidate.
+    await store.create_dimension("main-backup", source="main")
+    await store.create_dimension("main-candidate", source="main")
+    await store.set("main-candidate", "r1", {"site": "lyon"})
+    await store.set("main-candidate", "r2", {"site": "nice"})
+
+    # Switch main to the candidate in one step.
+    await store.replace_dimension("main", "main-candidate")
+    assert store.root_hash("main") == store.root_hash("main-candidate")
+    assert sorted(await store.keys("main")) == ["r1", "r2"]
+
+    # A later step failed: put the previous content back.
+    await store.replace_dimension("main", "main-backup")
+    assert store.root_hash("main") == before
+    assert await store.get("main", "r1") == {"site": "paris"}
+
+
+asyncio.run(main())
+```
+
+`replace_dimension()` does not check that `name` still holds the content it held when the candidate was created. A change made to `name` in the meantime is replaced. Permafrost does not yet provide a way to delete the candidate and backup dimensions.
 
 ### Loading values from the application's storage
 
@@ -315,7 +356,7 @@ asyncio.run(main())
 All errors inherit from `PermafrostError`.
 
 - `KeyNotFoundError`: the dimension does not hold the key. The loader is not called.
-- `DimensionNotFoundError`: the dimension is neither in memory nor in the external cache, or the external cache lost part of its key map. The application rebuilds the dimension from its own storage with the regular write operations.
+- `DimensionNotFoundError`: the dimension is neither in memory nor in the external cache, or the external cache lost part of its key map. `replace_dimension()` raises it for a `name` or a `source` that does not exist, and does not create `name`. The application rebuilds the dimension from its own storage with the regular write operations.
 - `DimensionExistsError`: `create_dimension()` was called with a name that already exists.
 - `CacheMissError`: the value is in no cache and no loader is registered.
 - `PathError`: a path does not exist in a value or cannot be changed.
