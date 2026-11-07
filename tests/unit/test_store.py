@@ -109,10 +109,40 @@ async def test_concurrent_updates_in_one_process_do_not_overwrite_each_other(sto
 # Dimensions
 
 
+async def test_list_dimensions_is_a_detached_snapshot():
+    store = Store()
+    assert store.dimensions() == []
+    await store.create_dimension("main")
+    await store.create_dimension("branch-a", source="main")
+    names = store.dimensions()
+    assert sorted(names) == ["branch-a", "main"]
+    names.clear()
+    assert sorted(store.dimensions()) == ["branch-a", "main"]
+    snapshot = store.dimensions()
+    await store.create_dimension("branch-b", source="main")
+    assert sorted(snapshot) == ["branch-a", "main"]
+    assert sorted(store.dimensions()) == ["branch-a", "branch-b", "main"]
+
+
 async def test_create_an_empty_dimension():
     store = Store()
     await store.create_dimension("snapshot-2026-10-24")
     assert await store.keys("snapshot-2026-10-24") == []
+
+
+async def test_has_dimension_without_backend():
+    async def loader(dimension: str, key: str) -> int:
+        raise AssertionError("Checking a dimension must not call the loader")
+
+    store = Store[int](loader=loader)
+    assert await store.has_dimension("main") is False
+    assert store.dimensions() == []
+    await store.create_dimension("main")
+    assert await store.has_dimension("main") is True
+    await store.set("main", "k", 1)
+    assert await store.has_dimension("main") is True
+    assert await store.has_dimension("unknown") is False
+    assert store.dimensions() == ["main"]
 
 
 async def test_create_a_dimension_that_exists(store):

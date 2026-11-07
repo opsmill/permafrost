@@ -246,6 +246,8 @@ def test_diff_content_is_object() -> None:
 
 async def test_store_of_models() -> None:
     store = Store[Device]()
+    assert_type(store.dimensions(), list[str])
+    assert_type(await store.has_dimension("main"), bool)
     await store.create_dimension("main")
     assert_type(await store.set("main", "r1", Device(name="r1")), Device)
     assert_type(await store.get("main", "r1"), Device)

@@ -116,6 +116,8 @@ Values and key maps are both trees of read-only nodes, stored once in the regist
 
 ### 1. Store data across many dimensions
 
+- A user lists the names of dimensions held in the current store's memory, synchronously and in no defined order. The returned list is a detached snapshot; changing it does not change the store. Listing does not query the external cache or call the loader.
+- A user checks whether a dimension exists with an `async` operation. It returns true when the name is held in memory or has a root entry in the external cache, and false otherwise. It does not fetch nodes, call the loader, or add the dimension to memory.
 - A user stores a value under a key in a given dimension, and reads it back from that dimension.
 - A user reads one dimension at a time. Reading a dimension does not require loading the other dimensions.
 - A user creates a new dimension from an existing one. The new dimension is an independent copy from the start: later changes to either dimension do not affect the other.
@@ -193,6 +195,7 @@ These rules come from the existing project notes in `AGENTS.md` and need confirm
 
 ### 9. Share dimensions between processes
 
+- Checking whether a dimension exists uses memory first without a backend call, then reads only its external root entry if needed. Backend errors propagate. A positive result does not guarantee that the external cache still holds all nodes or that a later operation succeeds; a dimension held in memory still exists locally after the external cache loses its root entry.
 - Permafrost keeps the map from dimension name to the root hash of its key map in memory and also writes it to the external cache, so other processes that use the same external cache can read the dimension.
 - A process that reads a dimension it does not hold in memory reads the root hash from the external cache, then fetches the key map nodes and value nodes it needs by hash.
 - When a process changes a dimension, it writes the new nodes to the external cache first, then writes the new root hash. A process that reads the new root hash can then fetch every node it refers to, unless the external cache has removed some of them since.
