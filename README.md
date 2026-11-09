@@ -273,6 +273,10 @@ async def main():
     await store.delete("branch-a", "r2")
     assert sorted(await store.keys("branch-a")) == ["r1"]
 
+    # Several sets and deletes in one commit: readers get all of them or none.
+    await store.set_many("main", {"r3": {"site": "nice", "vlans": []}}, delete=["r1", "r2"])
+    assert sorted(await store.keys("main")) == ["r3"]
+
 
 asyncio.run(main())
 ```
@@ -282,6 +286,7 @@ asyncio.run(main())
 - `await has_dimension(dimension)` returns whether the name is held in memory or has a root entry in the external cache. It checks memory first, then makes one root lookup if needed. It does not fetch nodes, call the loader, or add the dimension to memory. Backend errors propagate.
 - `replace_dimension(name, source)` replaces the keys and values of the existing dimension `name` with those of `source` (see [Replacing the content of a dimension](#replacing-the-content-of-a-dimension)).
 - `set`, `get`, `delete` and `update` store, read, delete and change the value under a key. `update(dimension, key, change)` stores `change(value)`, where `change` is usually a call to `set_in()`, `delete_in()` or `merge()`, or an `async` function.
+- `set_many(dimension, values, *, delete=())` stores every value of the mapping `values` under its key and deletes every key in `delete`, then switches the dimension to one new root. Readers get either the previous content or all the changes, never only some of them. It returns a dict of the read-only values. If any change fails, for example a value that cannot be frozen or a key to delete that the dimension does not hold, the dimension keeps its previous content. With an external cache, it writes all new nodes in one request, then the root hash once.
 - `keys(dimension)` returns the keys in no defined order, without reading any value.
 - `diff_keys(a, b)` returns the keys whose values differ between two dimensions. `diff(a, b, key)` returns the diff of one key. Both skip every part whose hash is the same on both sides.
 - `root_hash(dimension)` returns the root hash of a dimension held in memory. Two dimensions with the same keys and values have the same root hash, whatever the order in which the keys were added.

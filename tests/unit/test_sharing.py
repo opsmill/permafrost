@@ -131,6 +131,63 @@ async def test_failed_write_leaves_the_dimension_unchanged(a):
         assert backend.roots["main"] == store.root_hash("main")
 
 
+async def test_set_many_of_200_keys_writes_once(backend, a):
+    with a:
+        store = Store(backend)
+        await store.create_dimension("main")
+        backend.log.clear()
+        backend.set_requests = 0
+        await store.set_many("main", {f"k{i}": {"batch": i} for i in range(200)})
+    assert backend.set_requests == 1
+    assert backend.log == ["set_many", "set_root"]
+    assert backend.roots["main"] == store.root_hash("main")
+
+
+async def test_set_many_that_changes_nothing_writes_no_root(backend, a):
+    with a:
+        store = Store(backend)
+        await store.create_dimension("main")
+        await store.set_many("main", {"a": 1, "b": 2})
+        backend.log.clear()
+        await store.set_many("main", {"a": 1, "b": 2})
+    assert "set_root" not in backend.log
+
+
+async def test_set_many_with_a_failed_node_write_changes_nothing(a):
+    backend = FailingBackend()
+    with a:
+        store = Store(backend)
+        await store.create_dimension("main")
+        await store.set_many("main", {"a": 0, "b": 0})
+        before = store.root_hash("main")
+        backend.fail = True
+        backend.log.clear()
+        with pytest.raises(ConnectionError):
+            await store.set_many("main", {"a": 1, "c": 1}, delete=["b"])
+        assert "set_root" not in backend.log
+        assert store.root_hash("main") == before
+        assert backend.roots["main"] == before
+        assert await store.get("main", "b") == 0
+
+
+async def test_other_process_reads_a_change_to_several_keys(backend, a, b):
+    with a:
+        writer = Store(backend)
+        await writer.create_dimension("main")
+        await writer.set_many("main", {"a": 0, "b": 0, "c": 0})
+    with b:
+        reader = Store(backend)
+        assert await reader.get("main", "a") == 0
+    with a:
+        await writer.set_many("main", {"a": {"new": [1]}, "d": 2}, delete=["c"])
+    with b:
+        await reader.reload("main")
+        assert await reader.get("main", "a") == {"new": [1]}
+        assert await reader.get("main", "d") == 2
+        assert sorted(await reader.keys("main")) == ["a", "b", "d"]
+        assert reader.root_hash("main") == writer.root_hash("main")
+
+
 async def test_replace_a_dimension_writes_only_the_root_hash(backend, a):
     with a:
         store = Store(backend)

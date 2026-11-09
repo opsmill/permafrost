@@ -3,7 +3,7 @@
 import pytest
 from redis.asyncio import Redis
 
-from permafrost import Backend, CacheMissError, DimensionNotFoundError, Store, hash_of, registry
+from permafrost import Backend, CacheMissError, DimensionNotFoundError, KeyNotFoundError, Store, hash_of, registry
 from permafrost.backends.redis import RedisBackend
 
 from ..process import Process
@@ -151,6 +151,41 @@ async def test_reader_sees_updates_only_after_reload(
         await reader.reload("main")
         assert await reader.get("main", "k") == {"version": 2}
         assert reader.root_hash("main") == writer.root_hash("main")
+
+
+async def test_change_to_several_keys_is_read_by_another_process(
+    redis_backend: RedisBackend[Redis], redis_peer: RedisBackend[Redis]
+) -> None:
+    with Process():
+        writer = Store[object](redis_backend)
+        await writer.create_dimension("main")
+        await writer.set_many("main", {"a": 0, "b": 0, "c": 0})
+        result = await writer.set_many("main", {"a": {"kinds": [1, 2]}, "d": {"new": True}}, delete=["c"])
+        assert result == {"a": {"kinds": [1, 2]}, "d": {"new": True}}
+        root = writer.root_hash("main")
+    assert await redis_peer.get_root("main") == root
+    with Process():
+        assert registry.lookup(hash_of({"kinds": [1, 2]}), object) is None
+        reader = Store[object](redis_peer)
+        assert await reader.get("main", "a") == {"kinds": [1, 2]}
+        assert await reader.get("main", "b") == 0
+        assert await reader.get("main", "d") == {"new": True}
+        with pytest.raises(KeyNotFoundError):
+            await reader.get("main", "c")
+        assert reader.root_hash("main") == root
+
+
+async def test_failed_change_to_several_keys_keeps_the_redis_root(redis_backend: RedisBackend[Redis]) -> None:
+    with Process():
+        store = Store[object](redis_backend)
+        await store.create_dimension("main")
+        await store.set_many("main", {"a": 0, "b": 0})
+        before = await redis_backend.get_root("main")
+        assert before == store.root_hash("main")
+        with pytest.raises(KeyNotFoundError):
+            await store.set_many("main", {"a": 1}, delete=["missing"])
+        assert await redis_backend.get_root("main") == before
+        assert store.root_hash("main") == before
 
 
 async def test_dimension_copy_remains_independent(

@@ -7,7 +7,7 @@ import inspect
 import logging
 import time
 import weakref
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import cast
@@ -203,6 +203,43 @@ class Store[V]:
             root = await self._root(dimension)
             await self._commit(dimension, keymap.set(root, key, vh), (frozen,), previous=root)
         self._cache(vh, frozen)
+        return frozen
+
+    async def set_many(self, dimension: str, values: Mapping[str, V], *, delete: Iterable[str] = ()) -> dict[str, V]:
+        """Store every value of ``values`` under its key and delete every key in ``delete``, in one commit.
+
+        Return a new dict that maps each key of ``values`` to the read-only
+        form of its value. The dimension switches to one new root: readers get
+        either the previous content or all the changes, never only some of
+        them. With a backend, the new nodes of all changes are written in one
+        request, then the root hash once.
+
+        If any change fails, the dimension keeps its previous root and the
+        error propagates: ``ValueError`` for a key that is in both arguments,
+        ``UnsupportedTypeError`` for a value that cannot be frozen,
+        ``KeyNotFoundError`` for a key in ``delete`` that the dimension does
+        not hold, or an error from the backend.
+        """
+        to_set = dict(values)
+        to_delete = set(delete)
+        both = to_set.keys() & to_delete
+        if both:
+            raise ValueError(f"keys to set and to delete overlap: {sorted(both)}")
+        frozen = {key: self._typed(freeze(value)) for key, value in to_set.items()}
+        hashes = {key: hash_of(value) for key, value in frozen.items()}
+        async with self._lock(dimension):
+            root = await self._root(dimension)
+            for key in sorted(to_delete):
+                if keymap.get(root, key) is None:
+                    raise KeyNotFoundError(dimension, key)
+            new = root
+            for key, vh in hashes.items():
+                new = keymap.set(new, key, vh)
+            for key in to_delete:
+                new = keymap.delete(new, key)
+            await self._commit(dimension, new, frozen.values(), previous=root)
+        for key, value in frozen.items():
+            self._cache(hashes[key], value)
         return frozen
 
     async def delete(self, dimension: str, key: str) -> None:
