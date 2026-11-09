@@ -12,6 +12,7 @@ from permafrost import (
     KeyChange,
     KeyNotFoundError,
     Store,
+    UnsupportedTypeError,
     freeze,
     hash_of,
     merge,
@@ -67,6 +68,99 @@ async def test_delete_a_key_on_a_branch(store):
         await store.get("branch-a", "device-1")
     with pytest.raises(KeyNotFoundError):
         await store.delete("branch-a", "device-1")
+
+
+# Change several keys in one commit
+
+
+@pytest.fixture
+async def abc(store):
+    for key in "abc":
+        await store.set("main", key, 0)
+    return store
+
+
+async def _values(store, dimension="main"):
+    return {key: await store.get(dimension, key) for key in await store.keys(dimension)}
+
+
+async def test_set_and_delete_several_keys(abc):
+    result = await abc.set_many("main", {"a": 1, "b": 1}, delete=["c"])
+    assert result == {"a": 1, "b": 1}
+    assert await _values(abc) == {"a": 1, "b": 1}
+
+
+async def test_reader_during_a_change_views_all_or_nothing(abc):
+    viewed = []
+    done = False
+
+    async def reader():
+        while not done:
+            viewed.append(tuple([await abc.get("main", key) for key in "abc"]))
+            await asyncio.sleep(0)
+
+    async def writer():
+        nonlocal done
+        await asyncio.sleep(0)
+        await abc.set_many("main", {"a": 1, "b": 1, "c": 1})
+        await asyncio.sleep(0)
+        done = True
+
+    await asyncio.gather(reader(), writer())
+    assert set(viewed) <= {(0, 0, 0), (1, 1, 1)}
+    assert viewed[-1] == (1, 1, 1)
+
+
+async def test_set_many_gives_the_same_root_hash_as_single_changes(abc):
+    await abc.create_dimension("copy", source="main")
+    await abc.set_many("main", {"a": 1, "d": {"x": [1]}}, delete=["b", "c"])
+    await abc.set("copy", "a", 1)
+    await abc.set("copy", "d", {"x": [1]})
+    await abc.delete("copy", "b")
+    await abc.delete("copy", "c")
+    assert abc.root_hash("main") == abc.root_hash("copy")
+
+
+async def test_set_many_returns_read_only_values(store):
+    result = await store.set_many("main", {"k": {"l": [1, 2]}})
+    assert result["k"] == freeze({"l": [1, 2]})
+    assert not isinstance(result["k"]["l"], list)
+    assert result["k"] is await store.get("main", "k")
+
+
+@pytest.mark.parametrize("values", [{}, {"a": 0, "b": 0}])
+async def test_set_many_that_changes_nothing_keeps_the_root(abc, values):
+    before = abc.root_hash("main")
+    assert await abc.set_many("main", values) == values
+    assert abc.root_hash("main") == before
+
+
+async def test_set_many_with_a_value_that_cannot_be_frozen_changes_nothing(abc):
+    before = abc.root_hash("main")
+    with pytest.raises(UnsupportedTypeError):
+        await abc.set_many("main", {"a": 1, "b": object()})
+    assert abc.root_hash("main") == before
+    assert await _values(abc) == {"a": 0, "b": 0, "c": 0}
+
+
+async def test_set_many_deleting_a_missing_key_changes_nothing(abc):
+    before = abc.root_hash("main")
+    with pytest.raises(KeyNotFoundError):
+        await abc.set_many("main", {"a": 1}, delete=["missing"])
+    assert abc.root_hash("main") == before
+    assert await abc.get("main", "a") == 0
+
+
+async def test_set_many_with_the_same_key_to_set_and_delete(abc):
+    before = abc.root_hash("main")
+    with pytest.raises(ValueError, match="overlap"):
+        await abc.set_many("main", {"a": 1}, delete=["a"])
+    assert abc.root_hash("main") == before
+
+
+async def test_set_many_on_an_unknown_dimension(store):
+    with pytest.raises(DimensionNotFoundError):
+        await store.set_many("nope", {"a": 1})
 
 
 # Update
