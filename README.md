@@ -333,6 +333,44 @@ asyncio.run(main())
 
 `replace_dimension()` does not check that `name` still holds the content it held when the candidate was created. A change made to `name` in the meantime is replaced. Permafrost does not yet provide a way to delete the candidate and backup dimensions.
 
+### Snapshots
+
+An application that reads a dimension from synchronous code takes a snapshot of it once, with one `await`, then reads the snapshot without `await`. `await store.snapshot(dimension)` reads the root of the dimension once, then every value under it: from memory, then from the external cache, then with the loader. With an external cache, it fetches the missing values together, one tree level at a time. When a value cannot be read, for example a cache miss without a loader, the error propagates and no snapshot is returned.
+
+```python
+import asyncio
+
+from permafrost import Store
+
+
+def site_of(snapshot, key):
+    # A regular function: reads from a snapshot do not need await.
+    return snapshot.get(key)["site"]
+
+
+async def main():
+    store = Store()
+    await store.create_dimension("main")
+    await store.set_many("main", {"r1": {"site": "paris"}, "r2": {"site": "lyon"}})
+
+    snapshot = await store.snapshot("main")
+    await store.set("main", "r1", {"site": "nice"})
+
+    # The snapshot keeps the values it held when it was taken.
+    assert site_of(snapshot, "r1") == "paris"
+    assert sorted(snapshot.keys()) == ["r1", "r2"]
+    assert "r3" not in snapshot
+    assert snapshot.root_hash != store.root_hash("main")
+    assert (await store.get("main", "r1"))["site"] == "nice"
+
+
+asyncio.run(main())
+```
+
+- `snapshot.get(key)` returns the value, or raises `KeyNotFoundError`. `snapshot.keys()` returns a new list of the keys, in no defined order. `key in snapshot` checks whether the snapshot holds a key. `snapshot.root_hash` and `snapshot.dimension` return the root hash of its key map and the name of the dimension.
+- Later changes to the dimension, including a reload from the external cache, do not change the snapshot. Take a new snapshot to read them.
+- A snapshot holds every one of its values, so cleanup does not free them while the application holds the snapshot. Cleanup can still evict them from the value cache, and values that only a snapshot holds are not counted in `cached_size` or the memory limit. Drop the snapshot at the end of the request or task that took it.
+
 ### Loading values from the application's storage
 
 Permafrost only caches data. When a value is in no cache, the store awaits the loader with the dimension name and the key, stores the value that the loader returns, and returns it. If the loader returns content different from what the key map refers to, the store stores the loaded value under the key, so the root hash of the dimension changes.

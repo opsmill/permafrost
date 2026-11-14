@@ -15,7 +15,7 @@ from .errors import (
 )
 from .nodes import FrozenDict, FrozenList, FrozenModel, FrozenSet, FrozenTuple
 from .ops import Path, Step, delete_in, merge, set_in
-from .store import KeyChange, Loader, Store
+from .store import KeyChange, Loader, Snapshot, Store
 from .types import TypeHandler, equal, freeze, hash_of, register_class, register_type
 
 __all__ = [
@@ -38,6 +38,7 @@ __all__ = [
     "PermafrostError",
     "ReadOnlyError",
     "Scalar",
+    "Snapshot",
     "Step",
     "Store",
     "TypeHandler",

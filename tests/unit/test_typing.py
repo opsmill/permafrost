@@ -21,6 +21,7 @@ from permafrost import (
     FrozenList,
     FrozenSet,
     FrozenTuple,
+    Snapshot,
     Step,
     Store,
     TypeHandler,
@@ -253,6 +254,18 @@ async def test_store_of_models() -> None:
     assert_type(await store.get("main", "r1"), Device)
     updated = await store.update("main", "r1", lambda device: merge(device, {"site": "lyon"}))
     assert_type(updated, Device)
+
+
+async def test_snapshot_of_a_store_of_models() -> None:
+    store = Store[Device]()
+    await store.create_dimension("main")
+    await store.set("main", "r1", Device(name="r1"))
+    snap = await store.snapshot("main")
+    assert_type(snap, Snapshot[Device])
+    assert_type(snap.get("r1"), Device)
+    assert_type(snap.keys(), list[str])
+    assert_type(snap.root_hash, bytes)
+    assert_type("r1" in snap, bool)
 
 
 async def _load_device(dimension: str, key: str) -> Device:

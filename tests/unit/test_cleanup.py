@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from permafrost import MemoryBackend, Store, hash_of
+from permafrost import CacheMissError, MemoryBackend, Store, hash_of
 
 MINUTE = 60.0
 
@@ -186,3 +186,45 @@ async def test_interval_helper_survives_a_failed_cleanup(monkeypatch):
     await asyncio.sleep(0.06)
     assert len(runs) > 1 and not task.done()
     task.cancel()
+
+
+# A snapshot keeps its values in memory: scenarios of specs/dimension-snapshots/spec.md
+
+
+async def test_snapshot_values_survive_cleanup_with_a_memory_limit(clock, collect):
+    store = await _store(clock, memory_limit=1)
+    await store.set_many("main", {f"k{i}": {"limit": i, "items": [i, i + 1]} for i in range(5)})
+    snap = await store.snapshot("main")
+    assert await store.cleanup() == 5
+    assert store.cached_values == 0
+    collect()
+    for i in range(5):
+        assert snap.get(f"k{i}") == {"limit": i, "items": [i, i + 1]}
+
+
+async def test_snapshot_values_survive_eviction_by_idle_time(clock, collect):
+    store = await _store(clock, eviction=True)
+    await store.set_many("main", {"a": {"idle-snapshot": 1}, "b": {"idle-snapshot": 2}})
+    snap = await store.snapshot("main")
+    clock.advance(61)
+    assert await store.cleanup() == 2
+    collect()
+    assert snap.get("a") == {"idle-snapshot": 1}
+    assert snap.get("b") == {"idle-snapshot": 2}
+    # The registry still finds the values that the snapshot holds.
+    assert await store.get("main", "a") is snap.get("a")
+    store._values.clear()
+    store._read_at.clear()
+    del snap
+    collect()
+    with pytest.raises(CacheMissError):
+        await store.get("main", "a")
+
+
+async def test_reads_from_a_snapshot_do_not_refresh_the_read_time(clock):
+    store = await _store(clock, eviction=True)
+    await store.set("main", "a", {"snapshot-read-time": 1})
+    snap = await store.snapshot("main")
+    clock.advance(61)
+    snap.get("a")
+    assert await store.cleanup() == 1
