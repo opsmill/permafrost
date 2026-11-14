@@ -1,5 +1,6 @@
 """Scenarios of specs/dimension-sharing/spec.md."""
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import fakeredis
@@ -402,3 +403,69 @@ async def test_root_hash_entry_in_redis(a):
         await store.create_dimension("main")
         await store.set("main", "k", {"v": 1})
     assert await backend.client.ttl("share:dim:main") == -1
+
+
+# Snapshots: scenarios of specs/dimension-snapshots/spec.md with a shared external cache
+
+
+async def test_snapshot_of_200_values_fetches_them_together(backend, a, b):
+    values = {f"key-{i}": {"snapshot-200": i, "items": [i, i + 1]} for i in range(200)}
+    with a:
+        store_a = Store(backend)
+        await store_a.create_dimension("main")
+        await store_a.set_many("main", values)
+    with b:
+        store_b = Store(backend)
+        # Fetch the key map first, so the count below covers only the values.
+        assert len(await store_b.keys("main")) == 200
+        gets = backend.get_requests
+        snap = await store_b.snapshot("main")
+        # Two tree levels: the dictionaries, then the lists they hold.
+        assert backend.get_requests == gets + 2
+        for key, value in values.items():
+            assert snap.get(key) == value
+        assert snap.root_hash == store_a.root_hash("main")
+
+
+async def test_snapshot_does_not_follow_a_change_made_while_it_waits(backend, collect):
+    store = Store(backend)
+    await store.create_dimension("main")
+    await store.set_many("main", {k: {"during": 0} for k in "abc"})
+    store._values.clear()
+    store._read_at.clear()
+    collect()
+    started, written = asyncio.Event(), asyncio.Event()
+    get_many = backend.get_many
+
+    async def slow_get_many(hashes):
+        started.set()
+        await written.wait()
+        return await get_many(hashes)
+
+    async def writer():
+        await started.wait()
+        await store.set_many("main", {k: {"during": 1} for k in "abc"})
+        written.set()
+
+    with patch.object(backend, "get_many", slow_get_many):
+        snap, _ = await asyncio.gather(store.snapshot("main"), writer())
+    assert [snap.get(k) for k in "abc"] == [{"during": 0}] * 3
+    assert [await store.get("main", k) for k in "abc"] == [{"during": 1}] * 3
+
+
+async def test_snapshot_of_another_process_does_not_follow_a_reload(backend, a, b):
+    with a:
+        store_a = Store(backend)
+        await store_a.create_dimension("main")
+        await store_a.set_many("main", {"k": {"v": 1}, "gone": {"v": 0}})
+    with b:
+        store_b = Store(backend)
+        snap = await store_b.snapshot("main")
+    with a:
+        await store_a.set_many("main", {"k": {"v": 2}}, delete=["gone"])
+    with b:
+        await store_b.reload("main")
+        assert snap.get("k") == {"v": 1}
+        assert "gone" in snap
+        assert await store_b.get("main", "k") == {"v": 2}
+        assert snap.root_hash != store_b.root_hash("main")

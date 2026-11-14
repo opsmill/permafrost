@@ -277,3 +277,68 @@ async def test_missing_dimension_does_not_call_loader(
     with Process(), pytest.raises(DimensionNotFoundError, match="main"):
         await Store[object](redis_peer, loader=loader).get("main", "k")
     assert calls == []
+
+
+async def test_snapshot_reads_values_written_by_another_process(
+    redis_backend: RedisBackend[Redis], redis_peer: RedisBackend[Redis]
+) -> None:
+    values = {f"kind-{i}": {"snapshot-redis": i, "attributes": [{"name": f"a{i}"}, {"name": "b"}]} for i in range(50)}
+    a, b = Process(), Process()
+    with a:
+        writer = Store[object](redis_backend)
+        await writer.create_dimension("main")
+        await writer.set_many("main", values)
+    with b:
+        assert registry.lookup(hash_of(values["kind-0"]), object) is None
+        reader = Store[object](redis_peer)
+        snap = await reader.snapshot("main")
+        assert snap.root_hash == await redis_peer.get_root("main")
+        # Every read below is a regular function: no await.
+        assert sorted(snap.keys()) == sorted(values)
+        for key, value in values.items():
+            assert key in snap
+            assert snap.get(key) == value
+    with a:
+        await writer.set_many("main", {"kind-0": {"snapshot-redis": "changed"}}, delete=["kind-1"])
+    with b:
+        await reader.reload("main")
+        assert snap.get("kind-0") == values["kind-0"]
+        assert snap.get("kind-1") == values["kind-1"]
+        assert await reader.get("main", "kind-0") == {"snapshot-redis": "changed"}
+        with pytest.raises(KeyNotFoundError):
+            await reader.get("main", "kind-1")
+        assert reader.root_hash("main") == await redis_peer.get_root("main") != snap.root_hash
+
+
+@pytest.mark.parametrize("with_loader", [True, False])
+async def test_snapshot_of_values_that_redis_lost(
+    redis_backend: RedisBackend[Redis], redis_peer: RedisBackend[Redis], with_loader: bool
+) -> None:
+    values = {key: {"lost-in-redis": key, "items": [key]} for key in ("a", "b", "c")}
+    calls: list[tuple[str, str]] = []
+
+    async def loader(dimension: str, key: str) -> object:
+        calls.append((dimension, key))
+        return values[key]
+
+    with Process():
+        writer = Store[object](redis_backend)
+        await writer.create_dimension("main")
+        await writer.set_many("main", values)
+        root = writer.root_hash("main")
+    lost = hash_of(["b"])
+    assert await redis_backend.client.delete(f"{redis_backend.prefix}node:{lost.hex()}") == 1
+    with Process():
+        reader = Store[object](redis_peer, loader if with_loader else None)
+        if not with_loader:
+            with pytest.raises(CacheMissError) as info:
+                await reader.snapshot("main")
+            assert (info.value.dimension, info.value.key) == ("main", "b")
+            return
+        snap = await reader.snapshot("main")
+        assert calls == [("main", "b")]
+        for key, value in values.items():
+            assert snap.get(key) == value
+        assert snap.root_hash == root
+    # The loaded nodes were written to Redis again.
+    assert await redis_backend.client.exists(f"{redis_backend.prefix}node:{lost.hex()}") == 1

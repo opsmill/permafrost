@@ -9,6 +9,7 @@ from permafrost import (
     DiffEntry,
     DimensionExistsError,
     DimensionNotFoundError,
+    FrozenList,
     KeyChange,
     KeyNotFoundError,
     Store,
@@ -574,3 +575,176 @@ async def test_value_still_in_memory_elsewhere_is_not_loaded(collect):
     _evict_all(store)
     collect()
     assert await store.get("main", "k") is held
+
+
+# Snapshots: scenarios of specs/dimension-snapshots/spec.md, without an external cache
+
+
+async def test_snapshot_of_a_dimension_in_memory(store):
+    await store.set("main", "a", 1)
+    await store.set("main", "b", 2)
+    snap = await store.snapshot("main")
+    assert snap.dimension == "main"
+    assert snap.get("a") == 1
+    assert snap.get("b") == 2
+    assert sorted(snap.keys()) == ["a", "b"]
+
+
+async def test_snapshot_of_an_empty_dimension(store):
+    snap = await store.snapshot("main")
+    assert snap.keys() == []
+    assert snap.root_hash == store.root_hash("main")
+
+
+async def test_snapshot_of_a_dimension_that_does_not_exist():
+    with pytest.raises(DimensionNotFoundError):
+        await Store().snapshot("missing")
+
+
+async def test_snapshot_get_returns_the_stored_value_without_await(store):
+    stored = await store.set("main", "a", {"x": [1, 2]})
+    snap = await store.snapshot("main")
+    # get() is a regular function: the result is the value, not a coroutine.
+    assert snap.get("a") is stored
+
+
+async def test_snapshot_get_a_key_that_it_does_not_hold(store):
+    snap = await store.snapshot("main")
+    with pytest.raises(KeyNotFoundError) as info:
+        snap.get("missing")
+    assert (info.value.dimension, info.value.key) == ("main", "missing")
+
+
+async def test_snapshot_contains(store):
+    await store.set("main", "a", 1)
+    snap = await store.snapshot("main")
+    assert "a" in snap
+    assert "missing" not in snap
+
+
+async def test_snapshot_root_hash(store):
+    await store.set("main", "a", 1)
+    snap = await store.snapshot("main")
+    assert snap.root_hash == store.root_hash("main")
+
+
+async def test_snapshot_values_are_read_only(store):
+    await store.set("main", "a", {"vlans": [10, 20]})
+    snap = await store.snapshot("main")
+    value = snap.get("a")
+    assert value is await store.get("main", "a")
+    assert isinstance(value["vlans"], FrozenList)
+
+
+async def test_snapshot_keys_returns_a_new_list(store):
+    await store.set("main", "a", 1)
+    snap = await store.snapshot("main")
+    snap.keys().append("b")
+    assert snap.keys() == ["a"]
+
+
+async def test_snapshot_does_not_follow_later_changes(store):
+    await store.set_many("main", {"a": 1, "b": 2})
+    snap = await store.snapshot("main")
+    root = snap.root_hash
+    await store.set("main", "a", 2)
+    await store.set("main", "c", 3)
+    await store.delete("main", "b")
+    await store.update("main", "a", lambda v: v + 1)
+    await store.set_many("main", {"d": 4})
+    await store.create_dimension("other")
+    await store.replace_dimension("main", "other")
+    assert snap.get("a") == 1
+    assert "b" in snap
+    assert "c" not in snap
+    assert sorted(snap.keys()) == ["a", "b"]
+    assert snap.root_hash == root
+    assert snap.root_hash != store.root_hash("main")
+
+
+async def test_snapshot_reads_from_one_version_while_a_writer_runs(store):
+    await store.set_many("main", {"a": 0, "b": 0, "c": 0})
+    snap = await store.snapshot("main")
+    seen = []
+
+    async def writer():
+        for i in range(1, 4):
+            await store.set_many("main", {"a": i, "b": i, "c": i})
+            await asyncio.sleep(0)
+
+    async def reader():
+        for _ in range(4):
+            seen.append((snap.get("a"), snap.get("b"), snap.get("c")))
+            await asyncio.sleep(0)
+
+    await asyncio.gather(writer(), reader())
+    assert seen == [(0, 0, 0)] * 4
+    assert await store.get("main", "a") == 3
+
+
+async def test_snapshot_loads_values_that_no_cache_holds(collect):
+    calls = []
+
+    async def loader(dimension, key):
+        calls.append((dimension, key))
+        return {"loaded": key}
+
+    store = Store(loader=loader)
+    await store.create_dimension("main")
+    await store.set_many("main", {"a": {"loaded": "a"}, "b": {"loaded": "b"}})
+    root = store.root_hash("main")
+    _evict_all(store)
+    collect()
+    snap = await store.snapshot("main")
+    assert sorted(calls) == [("main", "a"), ("main", "b")]
+    assert snap.get("a") == {"loaded": "a"}
+    assert snap.root_hash == root == store.root_hash("main")
+    # Taking the snapshot put the loaded values back in the value cache.
+    assert store.cached_values == 2
+
+
+async def test_snapshot_with_a_loaded_value_that_has_another_hash(collect):
+    async def loader(dimension, key):
+        return {"a": {"version": 2}, "b": 1}[key]
+
+    store = Store(loader=loader)
+    await store.create_dimension("main")
+    await store.set("main", "a", {"version": 1})
+    await store.set("main", "b", 1)
+    _evict_all(store)
+    collect()
+    snap = await store.snapshot("main")
+    assert snap.get("a") == {"version": 2}
+    assert snap.get("b") == 1
+    expected = Store()
+    await expected.create_dimension("main")
+    await expected.set_many("main", {"a": {"version": 2}, "b": 1})
+    assert snap.root_hash == expected.root_hash("main")
+    # As with get(), the loaded value is stored under the key.
+    assert store.root_hash("main") == snap.root_hash
+
+
+async def test_snapshot_cache_miss_without_a_loader(collect):
+    store = Store()
+    await store.create_dimension("main")
+    await store.set("main", "a", {"miss": 1})
+    _evict_all(store)
+    collect()
+    with pytest.raises(CacheMissError) as info:
+        await store.snapshot("main")
+    assert (info.value.dimension, info.value.key) == ("main", "a")
+
+
+async def test_snapshot_loader_error(collect):
+    async def loader(dimension, key):
+        raise RuntimeError("database down")
+
+    store = Store(loader=loader)
+    await store.create_dimension("main")
+    await store.set("main", "a", {"loader-fails-in-snapshot": 1})
+    root = store.root_hash("main")
+    _evict_all(store)
+    collect()
+    with pytest.raises(RuntimeError, match="database down"):
+        await store.snapshot("main")
+    assert store.root_hash("main") == root

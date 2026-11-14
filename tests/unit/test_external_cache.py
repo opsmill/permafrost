@@ -3,7 +3,7 @@
 import msgpack
 import pytest
 
-from permafrost import Backend, MemoryBackend, Store, codec, freeze, hash_of, registry
+from permafrost import Backend, CacheMissError, MemoryBackend, Store, codec, freeze, hash_of, registry
 from permafrost.types import walk
 
 from ..models import State
@@ -261,3 +261,67 @@ async def test_enum_class_cannot_be_found_when_rebuilding(setup, collect, name, 
     backend.nodes[hash_of({"s": State.PRESENT})] = _dict_with_enum(name, value)
     assert await store.get("main", "k") == {"s": State.PRESENT}
     assert calls == ["k"]
+
+
+# Snapshots: scenarios of specs/dimension-snapshots/spec.md with an external cache
+
+
+async def test_snapshot_reads_values_evicted_from_memory(setup, collect):
+    backend, store = setup
+
+    async def loader(d, k):
+        raise AssertionError("loader must not be called")
+
+    store.loader = loader
+    await store.set_many("main", {"a": {"evicted-snap": [1]}, "b": {"evicted-snap": [2]}})
+    _forget(store, collect)
+    gets = backend.get_requests
+    snap = await store.snapshot("main")
+    assert snap.get("a") == {"evicted-snap": [1]}
+    assert snap.get("b") == {"evicted-snap": [2]}
+    # Both values were fetched together: one request for each tree level.
+    assert backend.get_requests == gets + 2
+
+
+async def test_snapshot_loads_only_the_value_with_a_lost_node(setup, collect):
+    backend, store = setup
+    calls = []
+
+    async def loader(d, k):
+        calls.append(k)
+        return {"lost-snap": {"child": ["b"]}}
+
+    store.loader = loader
+    values = {key: {"lost-snap": {"child": [key]}} for key in ("a", "b", "c")}
+    await store.set_many("main", values)
+    root = store.root_hash("main")
+    _forget(store, collect)
+    backend.drop([hash_of({"child": ["b"]})])
+    snap = await store.snapshot("main")
+    assert calls == ["b"]
+    for key, value in values.items():
+        assert snap.get(key) == value
+    assert snap.root_hash == root
+    # The loaded nodes were written to the external cache again.
+    assert hash_of({"child": ["b"]}) in backend.nodes
+
+
+async def test_snapshot_cache_miss_with_an_external_cache_and_no_loader(setup, collect):
+    backend, store = setup
+    await store.set_many("main", {"a": {"miss-snap": 1}, "b": {"miss-snap": 2}})
+    _forget(store, collect)
+    backend.drop([hash_of({"miss-snap": 2})])
+    with pytest.raises(CacheMissError) as info:
+        await store.snapshot("main")
+    assert info.value.key == "b"
+
+
+async def test_fetch_many_returns_the_complete_trees(setup, collect):
+    backend, store = setup
+    await store.set_many("main", {"a": {"many": [1]}, "b": {"many": [2]}})
+    _forget(store, collect)
+    backend.drop([hash_of([2])])
+    a, b = hash_of({"many": [1]}), hash_of({"many": [2]})
+    fetched = await store._fetch_many([a, b, a])
+    assert list(fetched) == [a]
+    assert fetched[a] == {"many": [1]}

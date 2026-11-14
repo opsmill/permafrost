@@ -97,11 +97,12 @@ Values and key maps are both trees of read-only nodes, stored once in the regist
 ### What keeps nodes in memory
 
 - The registry holds weak references to nodes. It finds an existing node by hash, so identical nodes are stored once, but it does not keep a node in memory on its own.
-- Two places hold strong references, which keep nodes in memory:
+- Three places hold strong references, which keep nodes in memory:
   - Each dimension holds its key map root, which holds the rest of its key map.
   - The value cache holds the root of each value that was read or written recently, with the time of the last read. A value root holds all the nodes of the value.
+  - Each snapshot of a dimension that the application holds keeps the root of each of its values (see [Store data across many dimensions](#1-store-data-across-many-dimensions)).
 - Because nodes are read-only and never refer to their parents, the trees have no reference cycles. Python frees a node as soon as the last strong reference to it is gone, and the registry entry disappears with it. Removing nodes that nothing refers to does not need a separate garbage collection step.
-- Eviction removes a value root from the value cache. Python then frees every node of the value that no other value or key map refers to.
+- Eviction removes a value root from the value cache. Python then frees every node of the value that no other value, key map or snapshot refers to.
 
 ### Requirements that weak references put on nodes
 
@@ -123,6 +124,7 @@ Values and key maps are both trees of read-only nodes, stored once in the regist
 - A user reads one dimension at a time. Reading a dimension does not require loading the other dimensions.
 - A user creates a new dimension from an existing one. The new dimension is an independent copy from the start: later changes to either dimension do not affect the other.
 - A user replaces the keys and values of an existing dimension with those of another dimension, in one step. Like creating a dimension from another, this copies the root hash of the key map. Readers of the dimension get either the previous content or the new content, never part of each. Later changes to either dimension do not affect the other. This lets an application build and validate a change in a candidate dimension, then switch the original dimension to it.
+- A user takes a snapshot of a dimension with one `async` operation, then reads it with regular functions: get the value of a key, list the keys, check whether it holds a key, and return its root hash. The snapshot holds the keys and values of the root that the dimension had when the operation read it, so later changes to the dimension do not change it, and every read returns data from the same version. Taking the snapshot reads every value of the dimension before it returns, from memory, then from the external cache, then with the loader. With an external cache, it fetches the missing values together, one tree level at a time. This lets an application such as Infrahub obtain the schema of a branch once per request and read it from synchronous code.
 - The library supports hundreds to thousands of dimensions in the same process.
 - Branches are the main use case, but the library does not depend on the meaning of a dimension. Any name or identifier can be used as a dimension.
 
@@ -214,7 +216,7 @@ These rules come from the existing project notes in `AGENTS.md` and need confirm
 - The calling application stores the data in its own durable storage and loads it into Permafrost.
 - The external cache can lose any node at any time, for example when Redis restarts or removes entries to stay under its memory limit. Permafrost does not assume that a node it wrote to the external cache is still there.
 - The calling application registers a loader, which is an `async` function. When a value is a cache miss, Permafrost awaits the loader with one dimension and one key, and the loader returns the value from the application's storage.
-- Because a read can call the loader or the external cache, operations that read a value are `async`. Operations that only use data already in memory, such as comparing two hashes, are regular functions.
+- Because a read can call the loader or the external cache, operations that read a value are `async`. Operations that only use data already in memory, such as comparing two hashes, are regular functions. Reads from a snapshot of a dimension are regular functions too, because taking the snapshot reads every value before it returns.
 - Permafrost stores the value that the loader returns as it stores any other value, then returns it to the reader. Validation at the edge applies to it like any other incoming data.
 - If the external cache holds only some of the nodes of a value, Permafrost treats the value as a cache miss and calls the loader.
 - If no loader is registered, a cache miss raises an error.
@@ -231,6 +233,7 @@ These rules come from the existing project notes in `AGENTS.md` and need confirm
   - Garbage collection: Python frees nodes as soon as nothing refers to them (see [What keeps nodes in memory](#what-keeps-nodes-in-memory)), so cleanup does not need to find them.
 - A node shared by an evicted value and a value still in memory stays in memory, because the value still in memory refers to it.
 - A value that no dimension refers to any more, for example after its key was deleted, stays in the value cache until eviction removes it.
+- Cleanup does not free the values of a snapshot that the application still holds. It can evict them from the value cache, and they stay readable from the snapshot. Values that only a snapshot holds are not counted in the memory limit.
 - Proposed: Permafrost does not delete nodes from the external cache. The external cache removes nodes itself, with an expiry time on each entry and a memory limit. For Redis, Permafrost sets an expiry time when it writes a node and extends it when it reads the node. Because no process deletes nodes, a process cannot remove a node that another process sharing the same external cache still uses.
 - Each cache layer has its own idle time. For example, the in-memory cache evicts after 60 minutes, and entries in the external cache expire after 24 hours.
 - Without an external cache, eviction is optional. When it is turned on, a read of an evicted value calls the loader.
